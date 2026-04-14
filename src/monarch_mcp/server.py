@@ -831,7 +831,17 @@ def get_transaction_categories() -> str:
 
     categories = run_async(_get_transaction_categories())
 
-    return json.dumps(categories, indent=2, default=str)
+    slim = [
+        {
+            "id": c["id"],
+            "name": c["name"],
+            "is_disabled": c.get("isDisabled", False),
+            "group_name": c["group"]["name"],
+            "group_type": c["group"]["type"],
+        }
+        for c in categories.get("categories", [])
+    ]
+    return json.dumps(slim, indent=2)
 
 
 @mcp.tool()
