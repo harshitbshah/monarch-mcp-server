@@ -783,9 +783,13 @@ def create_transaction_rule(  # pylint: disable=too-many-arguments,too-many-posi
 
     result = run_async(_create_transaction_rule())
 
-    # Surface any API-level errors from the mutation payload
+    # Surface any API-level errors from the mutation payload.
+    # errors can be None (success), a list, or a bare dict — normalise to list.
     rule_result = result.get("createTransactionRuleV2", {}) if isinstance(result, dict) else {}
-    errors = rule_result.get("errors") or []
+    raw_errors = rule_result.get("errors")
+    if isinstance(raw_errors, dict):
+        raw_errors = [raw_errors]
+    errors = raw_errors or []
     if errors:
         return json.dumps(
             {"error": errors[0].get("message", "Unknown error"), "errors": errors},

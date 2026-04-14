@@ -203,11 +203,11 @@ async def test_create_rule_invalid_statement_operator(mcp_write_client, mock_mon
 
 
 # ===================================================================
-# 9 – API-level error surfaced from mutation payload
+# 9 – API-level error: errors as list
 # ===================================================================
 
 
-async def test_create_rule_api_error(mcp_write_client, mock_monarch_client):
+async def test_create_rule_api_error_list(mcp_write_client, mock_monarch_client):
     mock_monarch_client.gql_call.return_value = {
         "createTransactionRuleV2": {
             "errors": [{"message": "Category not found"}]
@@ -226,6 +226,33 @@ async def test_create_rule_api_error(mcp_write_client, mock_monarch_client):
 
     assert "error" in result
     assert "Category not found" in result["error"]
+
+
+# ===================================================================
+# 9b – API-level error: errors as bare dict (Monarch's actual shape)
+# ===================================================================
+
+
+async def test_create_rule_api_error_dict(mcp_write_client, mock_monarch_client):
+    mock_monarch_client.gql_call.return_value = {
+        "createTransactionRuleV2": {
+            "errors": {"message": "Invalid operator"}
+        }
+    }
+
+    result = json.loads(
+        (await mcp_write_client.call_tool(
+            "create_transaction_rule",
+            {
+                "set_category_id": "cat-123",
+                "merchant_name_value": "Amazon",
+                "merchant_name_operator": "contains",
+            },
+        )).content[0].text
+    )
+
+    assert "error" in result
+    assert "Invalid operator" in result["error"]
 
 
 # ===================================================================
