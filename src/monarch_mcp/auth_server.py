@@ -19,7 +19,7 @@ import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from gql.transport.exceptions import TransportServerError
-from monarchmoney import MonarchMoney, RequireMFAException, LoginFailedException
+from monarchmoney import MonarchMoney, LoginFailedException
 
 from monarch_mcp.secure_session import secure_session, is_auth_error
 
@@ -39,10 +39,6 @@ _LOGIN_ERROR_MESSAGE = (
     "Login failed due to an unexpected error. "
     "Please try again, or check the server logs for details."
 )
-_MFA_ERROR_MESSAGE = (
-    "MFA verification failed due to an unexpected error. "
-    "Please try again, or check the server logs for details."
-)
 
 # ── HTML served to the browser ──────────────────────────────────────────
 
@@ -59,14 +55,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 background:#f5f5f5;display:flex;justify-content:center;align-items:center;
 min-height:100vh}
 .card{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.1);
-padding:40px;width:400px;max-width:92vw}
+padding:40px;width:460px;max-width:92vw}
 h1{color:#1a1a2e;font-size:22px;margin-bottom:6px}
-.sub{color:#666;font-size:14px;margin-bottom:24px}
+.sub{color:#666;font-size:14px;margin-bottom:20px}
+ol{color:#444;font-size:13px;line-height:1.7;margin:0 0 20px 18px}
+ol code{background:#f0f2f5;padding:1px 5px;border-radius:4px;font-size:12px}
 .fg{margin-bottom:16px}
 label{display:block;color:#333;font-size:14px;font-weight:500;margin-bottom:5px}
-input{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:8px;
-font-size:14px;outline:none;transition:border-color .2s}
-input:focus{border-color:#4a90d9}
+textarea{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:8px;
+font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;outline:none;
+transition:border-color .2s;resize:vertical;min-height:90px}
+textarea:focus{border-color:#4a90d9}
 button{width:100%;padding:12px;background:#4a90d9;color:#fff;border:none;
 border-radius:8px;font-size:15px;font-weight:500;cursor:pointer;
 transition:background .2s}
@@ -76,7 +75,6 @@ button:disabled{background:#bbb;cursor:not-allowed}
 .ok{text-align:center}
 .ok h2{color:#27ae60;margin-bottom:10px}
 .ok p{color:#666}
-#mfa{display:none}
 #done{display:none}
 .sp{display:inline-block;width:15px;height:15px;border:2px solid #fff;
 border-top-color:transparent;border-radius:50%;animation:r .7s linear infinite;
@@ -89,28 +87,19 @@ margin-right:8px;vertical-align:middle}
 
   <div id="login">
     <h1>Monarch Money</h1>
-    <p class="sub">Sign in to connect your MCP server</p>
+    <p class="sub">Connect your MCP server using a browser session cookie</p>
+    <ol>
+      <li>Sign in at <code>app.monarch.com</code> in a normal browser tab</li>
+      <li>Open DevTools &rarr; Network tab, click any <code>graphql</code> request</li>
+      <li>Under Request Headers, copy the full <code>Cookie</code> value</li>
+      <li>Paste it below</li>
+    </ol>
     <div class="fg">
-      <label for="email">Email</label>
-      <input id="email" type="email" placeholder="you@example.com" autofocus>
+      <label for="cookie">Cookie header</label>
+      <textarea id="cookie" placeholder="session_id=...; csrftoken=..." autofocus></textarea>
     </div>
-    <div class="fg">
-      <label for="pw">Password</label>
-      <input id="pw" type="password" placeholder="Your password">
-    </div>
-    <button id="lbtn" onclick="doLogin()">Sign In</button>
+    <button id="lbtn" onclick="doLogin()">Connect</button>
     <div id="lerr" class="err"></div>
-  </div>
-
-  <div id="mfa">
-    <h1>Two-Factor Authentication</h1>
-    <p class="sub">Enter the code from your authenticator app</p>
-    <div class="fg">
-      <label for="code">Authentication Code</label>
-      <input id="code" type="text" placeholder="123456" maxlength="10" inputmode="numeric">
-    </div>
-    <button id="mbtn" onclick="doMFA()">Verify</button>
-    <div id="merr" class="err"></div>
   </div>
 
   <div id="done" class="ok">
@@ -122,52 +111,27 @@ margin-right:8px;vertical-align:middle}
 </div>
 <script>
 function show(id){
-  ['login','mfa','done'].forEach(s=>document.getElementById(s).style.display='none');
+  ['login','done'].forEach(s=>document.getElementById(s).style.display='none');
   document.getElementById(id).style.display='block';
-  const af=document.querySelector('#'+id+' input');
-  if(af) af.focus();
 }
 function showErr(id,msg){const e=document.getElementById(id);e.textContent=msg;e.style.display='block'}
 function hideErr(id){document.getElementById(id).style.display='none'}
 
 async function doLogin(){
-  const email=document.getElementById('email').value.trim();
-  const pw=document.getElementById('pw').value;
-  if(!email||!pw){showErr('lerr','Please enter both email and password.');return}
+  const cookie=document.getElementById('cookie').value.trim();
+  if(!cookie){showErr('lerr','Paste your browser cookie string first.');return}
   const btn=document.getElementById('lbtn');
-  btn.disabled=true;btn.innerHTML='<span class="sp"></span>Signing in\u2026';
+  btn.disabled=true;btn.innerHTML='<span class="sp"></span>Connecting\u2026';
   hideErr('lerr');
   try{
     const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({email:email,password:pw})});
+      body:JSON.stringify({cookie:cookie})});
     const d=await r.json();
     if(d.success){show('done')}
-    else if(d.mfa_required){show('mfa')}
     else if(d.error){showErr('lerr',d.error)}
   }catch(e){showErr('lerr','Connection error. Please try again.')}
-  btn.disabled=false;btn.innerHTML='Sign In';
+  btn.disabled=false;btn.innerHTML='Connect';
 }
-
-async function doMFA(){
-  const code=document.getElementById('code').value.trim();
-  if(!code){showErr('merr','Please enter your authentication code.');return}
-  const btn=document.getElementById('mbtn');
-  btn.disabled=true;btn.innerHTML='<span class="sp"></span>Verifying\u2026';
-  hideErr('merr');
-  try{
-    const r=await fetch('/mfa',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({code:code})});
-    const d=await r.json();
-    if(d.success){show('done')}
-    else if(d.error){showErr('merr',d.error)}
-  }catch(e){showErr('merr','Connection error. Please try again.')}
-  btn.disabled=false;btn.innerHTML='Verify';
-}
-
-document.getElementById('email').addEventListener('keydown',e=>{if(e.key==='Enter'){
-  document.getElementById('pw').focus()}});
-document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
-document.getElementById('code').addEventListener('keydown',e=>{if(e.key==='Enter')doMFA()});
 </script>
 </body>
 </html>
@@ -225,21 +189,7 @@ async def with_auth_recovery(coro):
 @dataclass
 class _AuthState:
     """Mutable state shared between handler and server loop."""
-    email: str = ""
-    password: str = ""
-    awaiting_mfa: bool = False
     completed: bool = False
-
-    def clear_secrets(self) -> None:
-        """Drop the cached credentials once they are no longer needed.
-
-        The password is cached only to span the MFA challenge; scrub it (and
-        the email) as soon as auth completes or the server shuts down so it
-        does not linger in memory for the lifetime of the process.
-        """
-        self.email = ""
-        self.password = ""
-        self.awaiting_mfa = False
 
 
 class _AuthHandler(BaseHTTPRequestHandler):
@@ -298,7 +248,7 @@ class _AuthHandler(BaseHTTPRequestHandler):
     # ── POST ──
 
     def do_POST(self):  # pylint: disable=invalid-name
-        """Handle POST requests for /login and /mfa."""
+        """Handle POST requests for /login."""
         if not self._is_trusted_request():
             self.send_error(403)
             return
@@ -323,95 +273,49 @@ class _AuthHandler(BaseHTTPRequestHandler):
 
         if self.path == "/login":
             self._handle_login(data)
-        elif self.path == "/mfa":
-            self._handle_mfa(data)
         else:
             self.send_error(404)
 
     # ── Auth logic ──
 
     def _handle_login(self, data: dict):
-        """Authenticate with email/password, handling MFA if required."""
-        email = data.get("email", "").strip()
-        password = data.get("password", "")
+        """Authenticate using a pasted browser cookie string.
 
-        if not email or not password:
-            self._send_json({"error": "Email and password are required."})
+        Monarch now blocks programmatic password/MFA login behind a
+        Cloudflare CAPTCHA, so the only working path is a session
+        cookie copied from an already-authenticated browser tab.
+        """
+        cookie_string = data.get("cookie", "").strip()
+
+        if not cookie_string:
+            self._send_json({"error": "Paste your browser cookie string first."})
             return
 
         try:
             mm = MonarchMoney()
-            _run_sync(mm.login(email, password, use_saved_session=False, save_session=False))
+            _run_sync(mm.login_with_cookies(cookie_string, save_session=False))
 
-            # Login succeeded without MFA
             secure_session.save_authenticated_session(mm)
             self.auth_state.completed = True
-            logger.info("Browser authentication successful (no MFA)")
+            logger.info("Browser authentication successful (cookie)")
             self._send_json({"success": True})
 
-        except RequireMFAException:
-            self.auth_state.email = email
-            self.auth_state.password = password
-            self.auth_state.awaiting_mfa = True
-            self._send_json({"mfa_required": True})
-
-        except LoginFailedException:
-            logger.error("Login failed: invalid credentials")
-            self._send_json({"error": "Invalid email or password."})
+        except LoginFailedException as exc:
+            logger.error("Cookie login failed: %s", exc)
+            self._send_json(
+                {"error": str(exc) or "Invalid cookie. Please copy a fresh one and try again."}
+            )
 
         except TransportServerError as exc:
             code = getattr(exc, "code", "unknown")
-            logger.error("Monarch API HTTP %s during login: %s", code, exc)
+            logger.error("Monarch API HTTP %s during cookie login: %s", code, exc)
             self._send_json(
                 {"error": f"Monarch API error (HTTP {code}). Please try again later."}
             )
 
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.error("Unexpected error during login: %s", exc)
+            logger.error("Unexpected error during cookie login: %s", exc)
             self._send_json({"error": _LOGIN_ERROR_MESSAGE})
-
-    def _handle_mfa(self, data: dict):
-        """Verify the MFA code and complete authentication."""
-        code = data.get("code", "").strip()
-
-        if not code:
-            self._send_json({"error": "Authentication code is required."})
-            return
-
-        if not self.auth_state.awaiting_mfa:
-            self._send_json({"error": "No pending MFA challenge. Please sign in again."})
-            return
-
-        try:
-            mm = MonarchMoney()
-            _run_sync(
-                mm.multi_factor_authenticate(
-                    self.auth_state.email,
-                    self.auth_state.password,
-                    code,
-                )
-            )
-
-            secure_session.save_authenticated_session(mm)
-            self.auth_state.completed = True
-            self.auth_state.clear_secrets()
-            logger.info("Browser authentication successful (with MFA)")
-            self._send_json({"success": True})
-
-        except LoginFailedException:
-            logger.error("MFA verification failed: invalid code")
-            self._send_json({"error": "Invalid authentication code. Please try again."})
-
-        except TransportServerError as exc:
-            code_ = getattr(exc, "code", "unknown")
-            logger.error("Monarch API HTTP %s during MFA: %s", code_, exc)
-            self._send_json(
-                {"error": f"Monarch API error (HTTP {code_}). Please try again later."}
-            )
-
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.error("Unexpected error during MFA: %s", exc)
-            self._send_json({"error": _MFA_ERROR_MESSAGE})
 
     # ── Response helpers ──
 
@@ -440,23 +344,27 @@ class _AuthHandler(BaseHTTPRequestHandler):
 
 # ── Public API ──────────────────────────────────────────────────────────
 
-def _validate_token(token: str) -> bool | None:
-    """Check whether a stored token is still valid by making a quick API call.
+def _validate_credential(cred: dict) -> bool | None:
+    """Check whether a stored credential (cookie or token) is still valid.
 
-    Returns True if the token works, False if the token is definitively
-    invalid (401/403), or None if validation was inconclusive due to a
-    server-side error (so the existing token should be kept).
+    Returns True if it works, False if it's definitively invalid
+    (401/403), or None if validation was inconclusive due to a
+    server-side error (so the existing credential should be kept).
     """
     try:
-        mm = MonarchMoney(token=token)
+        if cred["auth_mode"] == "cookie":
+            mm = MonarchMoney()
+            mm.set_cookies(cred["cookies"])
+        else:
+            mm = MonarchMoney(token=cred["token"])
         _run_sync(mm.get_accounts())
         return True
     except Exception as exc:  # pylint: disable=broad-exception-caught
         if is_auth_error(exc):
-            logger.warning("Stored token is invalid or expired: %s", exc)
+            logger.warning("Stored credential is invalid or expired: %s", exc)
             return False
-        # Server-side error (5xx, network, etc.) — don't discard the token
-        logger.warning("Could not validate token (server error): %s", exc)
+        # Server-side error (5xx, network, etc.) — don't discard the credential
+        logger.warning("Could not validate credential (server error): %s", exc)
         return None
 
 
@@ -474,19 +382,19 @@ def trigger_auth_flow() -> None:
             logger.info("Auth server already running — skipping")
             return
 
-        # Check keyring token — validate it's still usable
-        token = secure_session.load_token()
-        if token:
-            result = _validate_token(token)
+        # Check keyring credential — validate it's still usable
+        cred = secure_session.load_credential()
+        if cred:
+            result = _validate_credential(cred)
             if result is True:
-                logger.info("Auth token found and validated — skipping browser auth")
+                logger.info("Auth credential found and validated — skipping browser auth")
                 return
             if result is None:
-                # Server error — keep the token, skip browser auth
-                logger.info("Token validation inconclusive (server error) — keeping token")
+                # Server error — keep the credential, skip browser auth
+                logger.info("Credential validation inconclusive (server error) — keeping it")
                 return
-            # Token is definitively invalid (401/403) — clear it
-            logger.warning("Clearing stale token from keyring")
+            # Credential is definitively invalid (401/403) — clear it
+            logger.warning("Clearing stale credential from keyring")
             secure_session.delete_token()
 
         # Environment-variable credentials present (handled at tool-call time)
@@ -526,7 +434,6 @@ def trigger_auth_flow() -> None:
             if state.completed:
                 logger.info("Auth server stopped — authentication complete")
         finally:
-            state.clear_secrets()
             with _auth_lock:
                 _auth_guard["active"] = False
 

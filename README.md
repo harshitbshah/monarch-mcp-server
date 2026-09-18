@@ -5,7 +5,7 @@ A Model Context Protocol (MCP) server for integrating with the Monarch Money per
 
 ## Overview
 
-- **Secure by design** — browser-based login, token stored in OS keychain (never in config files or env vars)
+- **Secure by design** — browser-based login, session stored in OS keychain (never in config files or env vars)
 - **Safe by default** — read-only mode prevents accidental changes; write tools require explicit opt-in
 - **Comprehensive** — 44 tools covering accounts, transactions, splits, budgets, cashflow, tags, categories, transaction rules, recurring merchants, and credit history
 - **Easy to install** — Claude Desktop extension (`.mcpb`), `uvx`, or `pip`
@@ -120,21 +120,27 @@ To enable write tools, add `"--enable-write"` to `args`.
 
 ### Authentication
 
-Authentication happens **automatically in your browser** the first time the MCP server starts without a saved session.
+Monarch blocks programmatic password/MFA login behind a Cloudflare CAPTCHA, so
+authentication uses a **browser session cookie** instead of typing your password
+into the login page.
+
+A local login page opens **automatically in your browser** the first time the
+MCP server starts without a saved session.
 
 1. Start (or restart) Claude Desktop
-2. The server detects that no token exists and opens a login page in your browser
-3. Enter your Monarch Money email and password
-4. Provide your 2FA code if you have MFA enabled
-5. Once authenticated, the token is saved to your system keyring — you're all set
+2. The server detects that no session exists and opens a login page in your browser
+3. In a separate tab, sign in at `app.monarch.com` normally
+4. Open DevTools → Network tab, click any `graphql` request, and copy the full
+   `Cookie` value from its Request Headers
+5. Paste that cookie string into the login page and click **Connect**
+6. Once verified, the session is saved to your system keyring — you're all set
 
 Key details:
 
 - **Credentials are entered in your browser only** — never through Claude Desktop
-- **Token stored in the OS keyring** — persists across restarts, lasts weeks/months
-- **Expired sessions re-authenticate automatically** — the browser login re-triggers on the next tool call
-- **MFA fully supported**
-- **Fallback**: run `python login_setup.py` in a terminal for headless environments
+- **Session stored in the OS keyring** — persists across restarts, lasts weeks/months
+- **Expired sessions re-authenticate automatically** — the browser login re-triggers on the next tool call, and you repeat the cookie-paste step
+- **Fallback**: run `python login_setup.py` in a terminal for headless environments (also prompts for a cookie string)
 
 For technical details on the auth architecture, see [docs/authentication.md](docs/authentication.md).
 

@@ -1,10 +1,12 @@
-"""SecureMonarchSession unit tests (17 tests).
+"""SecureMonarchSession unit tests.
 
-Covers save/load/delete token, get_authenticated_client,
-save_authenticated_session, and _cleanup_old_session_files.
+Covers save/load/delete credential (token and cookie modes),
+get_authenticated_client, save_authenticated_session, and
+_cleanup_old_session_files.
 """
 # pylint: disable=missing-function-docstring,protected-access
 
+import json
 import os
 from unittest.mock import patch, MagicMock
 
@@ -20,7 +22,7 @@ def session():
 
 
 # ===================================================================
-# save_token
+# save_token / save_cookies
 # ===================================================================
 
 
@@ -29,9 +31,10 @@ def test_save_token_success(session):
         session._cleanup_old_session_files = MagicMock()
         session.save_token("tok-123")
 
-    mock_kr.set_password.assert_called_once_with(
-        "com.mcp.monarch-mcp", "monarch-token", "tok-123",
-    )
+    args = mock_kr.set_password.call_args[0]
+    assert args[0] == "com.mcp.monarch-mcp"
+    assert args[1] == "monarch-token"
+    assert json.loads(args[2]) == {"auth_mode": "token", "token": "tok-123"}
     session._cleanup_old_session_files.assert_called_once()
 
 
@@ -42,31 +45,61 @@ def test_save_token_keyring_failure(session):
             session.save_token("tok-123")
 
 
+def test_save_cookies_success(session):
+    cookies = {"session_id": "abc", "csrftoken": "def"}
+    with patch("monarch_mcp.secure_session.keyring") as mock_kr:
+        session._cleanup_old_session_files = MagicMock()
+        session.save_cookies(cookies)
+
+    args = mock_kr.set_password.call_args[0]
+    assert json.loads(args[2]) == {"auth_mode": "cookie", "cookies": cookies}
+    session._cleanup_old_session_files.assert_called_once()
+
+
 # ===================================================================
-# load_token
+# load_credential
 # ===================================================================
 
 
-def test_load_token_found(session):
+def test_load_credential_cookie(session):
+    stored = json.dumps({"auth_mode": "cookie", "cookies": {"session_id": "a", "csrftoken": "b"}})
+    with patch("monarch_mcp.secure_session.keyring") as mock_kr:
+        mock_kr.get_password.return_value = stored
+        result = session.load_credential()
+
+    assert result == {"auth_mode": "cookie", "cookies": {"session_id": "a", "csrftoken": "b"}}
+
+
+def test_load_credential_token_json(session):
+    stored = json.dumps({"auth_mode": "token", "token": "tok-abc"})
+    with patch("monarch_mcp.secure_session.keyring") as mock_kr:
+        mock_kr.get_password.return_value = stored
+        result = session.load_credential()
+
+    assert result == {"auth_mode": "token", "token": "tok-abc"}
+
+
+def test_load_credential_legacy_plain_token(session):
+    """A bare string from before cookie-auth support is treated as a legacy token."""
     with patch("monarch_mcp.secure_session.keyring") as mock_kr:
         mock_kr.get_password.return_value = "tok-abc"
-        result = session.load_token()
+        result = session.load_credential()
 
-    assert result == "tok-abc"
+    assert result == {"auth_mode": "token", "token": "tok-abc"}
 
 
-def test_load_token_not_found(session):
+def test_load_credential_not_found(session):
     with patch("monarch_mcp.secure_session.keyring") as mock_kr:
         mock_kr.get_password.return_value = None
-        result = session.load_token()
+        result = session.load_credential()
 
     assert result is None
 
 
-def test_load_token_exception(session):
+def test_load_credential_exception(session):
     with patch("monarch_mcp.secure_session.keyring") as mock_kr:
         mock_kr.get_password.side_effect = RuntimeError("backend crash")
-        result = session.load_token()
+        result = session.load_credential()
 
     assert result is None
 
@@ -108,7 +141,7 @@ def test_delete_token_generic_exception(session):
 # ===================================================================
 
 
-def test_get_client_success(session):
+def test_get_client_success_token(session):
     with (
         patch("monarch_mcp.secure_session.keyring") as mock_kr,
         patch("monarch_mcp.secure_session.MonarchMoney") as mock_cls,
@@ -123,7 +156,24 @@ def test_get_client_success(session):
     mock_cls.assert_called_once_with(token="tok-abc")
 
 
-def test_get_client_no_token(session):
+def test_get_client_success_cookie(session):
+    stored = json.dumps({"auth_mode": "cookie", "cookies": {"session_id": "a", "csrftoken": "b"}})
+    with (
+        patch("monarch_mcp.secure_session.keyring") as mock_kr,
+        patch("monarch_mcp.secure_session.MonarchMoney") as mock_cls,
+    ):
+        mock_kr.get_password.return_value = stored
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+
+        result = session.get_authenticated_client()
+
+    assert result is mock_client
+    mock_cls.assert_called_once_with()
+    mock_client.set_cookies.assert_called_once_with({"session_id": "a", "csrftoken": "b"})
+
+
+def test_get_client_no_credential(session):
     with patch("monarch_mcp.secure_session.keyring") as mock_kr:
         mock_kr.get_password.return_value = None
         result = session.get_authenticated_client()
@@ -149,8 +199,21 @@ def test_get_client_creation_exception(session):
 # ===================================================================
 
 
+def test_save_session_with_cookies(session):
+    mm = MagicMock()
+    mm._cookies = {"session_id": "a", "csrftoken": "b"}
+    session.save_cookies = MagicMock()
+    session.save_token = MagicMock()
+
+    session.save_authenticated_session(mm)
+
+    session.save_cookies.assert_called_once_with({"session_id": "a", "csrftoken": "b"})
+    session.save_token.assert_not_called()
+
+
 def test_save_session_with_token(session):
     mm = MagicMock()
+    mm._cookies = None
     mm.token = "tok-xyz"
     session.save_token = MagicMock()
 
@@ -159,8 +222,9 @@ def test_save_session_with_token(session):
     session.save_token.assert_called_once_with("tok-xyz")
 
 
-def test_save_session_no_token(session):
+def test_save_session_no_credential(session):
     mm = MagicMock()
+    mm._cookies = None
     mm.token = None
     session.save_token = MagicMock()
 

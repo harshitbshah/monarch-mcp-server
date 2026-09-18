@@ -177,14 +177,14 @@ def test_login_handler_bad_credentials():
         patch("monarch_mcp.auth_server.MonarchMoney"),
         patch(
             "monarch_mcp.auth_server._run_sync",
-            side_effect=LoginFailedException(),
+            side_effect=LoginFailedException("Missing required cookies"),
         ),
     ):
-        handler._handle_login({"email": "a@b.com", "password": "wrong"})
+        handler._handle_login({"cookie": "not=valid"})
 
     response = handler._send_json.call_args[0][0]
     assert "error" in response
-    assert "Invalid email or password" in response["error"]
+    assert "Missing required cookies" in response["error"]
 
 
 def test_login_handler_transport_server_error():
@@ -196,7 +196,7 @@ def test_login_handler_transport_server_error():
             side_effect=TransportServerError("Server Error", code=500),
         ),
     ):
-        handler._handle_login({"email": "a@b.com", "password": "pass"})
+        handler._handle_login({"cookie": "session_id=a; csrftoken=b"})
 
     response = handler._send_json.call_args[0][0]
     assert "error" in response
@@ -212,73 +212,11 @@ def test_login_handler_unexpected_error():
             side_effect=OSError("network down"),
         ),
     ):
-        handler._handle_login({"email": "a@b.com", "password": "pass"})
+        handler._handle_login({"cookie": "session_id=a; csrftoken=b"})
 
     response = handler._send_json.call_args[0][0]
     assert "error" in response
     # The raw exception text must not leak to the client (info disclosure).
     assert "network down" not in response["error"]
-    assert "unexpected error" in response["error"].lower()
-    assert "logs" in response["error"].lower()
-
-
-# --- _handle_mfa ---
-
-def _make_mfa_handler():
-    """Create a handler in the awaiting-MFA state."""
-    handler = _make_handler()
-    handler.auth_state.email = "a@b.com"
-    handler.auth_state.password = "pass"
-    handler.auth_state.awaiting_mfa = True
-    return handler
-
-
-def test_mfa_handler_bad_code():
-    handler = _make_mfa_handler()
-    with (
-        patch("monarch_mcp.auth_server.MonarchMoney"),
-        patch(
-            "monarch_mcp.auth_server._run_sync",
-            side_effect=LoginFailedException(),
-        ),
-    ):
-        handler._handle_mfa({"code": "000000"})
-
-    response = handler._send_json.call_args[0][0]
-    assert "error" in response
-    assert "Invalid authentication code" in response["error"]
-
-
-def test_mfa_handler_transport_server_error():
-    handler = _make_mfa_handler()
-    with (
-        patch("monarch_mcp.auth_server.MonarchMoney"),
-        patch(
-            "monarch_mcp.auth_server._run_sync",
-            side_effect=TransportServerError("Server Error", code=503),
-        ),
-    ):
-        handler._handle_mfa({"code": "123456"})
-
-    response = handler._send_json.call_args[0][0]
-    assert "error" in response
-    assert "503" in response["error"]
-
-
-def test_mfa_handler_unexpected_error():
-    handler = _make_mfa_handler()
-    with (
-        patch("monarch_mcp.auth_server.MonarchMoney"),
-        patch(
-            "monarch_mcp.auth_server._run_sync",
-            side_effect=OSError("timeout"),
-        ),
-    ):
-        handler._handle_mfa({"code": "123456"})
-
-    response = handler._send_json.call_args[0][0]
-    assert "error" in response
-    # The raw exception text must not leak to the client (info disclosure).
-    assert "timeout" not in response["error"]
     assert "unexpected error" in response["error"].lower()
     assert "logs" in response["error"].lower()

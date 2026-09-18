@@ -1,10 +1,21 @@
 """
 Secure session management for Monarch Money MCP Server using keyring.
+
+Monarch now blocks programmatic password/MFA login behind a Cloudflare
+CAPTCHA challenge, so credentials are obtained by pasting a browser
+session cookie (see auth_server.py) rather than typing a password. To
+support both the current cookie-based flow and any pre-existing
+bearer-token session, the keyring entry stores a small JSON envelope:
+``{"auth_mode": "cookie", "cookies": {...}}`` or
+``{"auth_mode": "token", "token": "..."}``. A bare (non-JSON) string
+already in the keyring from before this change is treated as a legacy
+bearer token.
 """
 
+import json
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import keyring
 from monarchmoney import MonarchMoney, LoginFailedException
@@ -21,29 +32,50 @@ class SecureMonarchSession:
     """Manages Monarch Money sessions securely using the system keyring."""
 
     def save_token(self, token: str) -> None:
-        """Save the authentication token to the system keyring."""
+        """Save a bearer-token credential to the system keyring."""
+        self._save_credential({"auth_mode": "token", "token": token})
+
+    def save_cookies(self, cookies: dict[str, str]) -> None:
+        """Save a browser-cookie credential to the system keyring."""
+        self._save_credential({"auth_mode": "cookie", "cookies": cookies})
+
+    def _save_credential(self, data: dict[str, Any]) -> None:
         try:
-            keyring.set_password(KEYRING_SERVICE, KEYRING_USERNAME, token)
-            logger.info("Token saved securely to keyring")
+            keyring.set_password(KEYRING_SERVICE, KEYRING_USERNAME, json.dumps(data))
+            logger.info("Credential saved securely to keyring (%s)", data["auth_mode"])
 
             # Clean up any old insecure files
             self._cleanup_old_session_files()
 
         except Exception as e:
-            logger.error("Failed to save token to keyring: %s", e)
+            logger.error("Failed to save credential to keyring: %s", e)
             raise
 
-    def load_token(self) -> Optional[str]:
-        """Load the authentication token from the system keyring."""
+    def load_credential(self) -> Optional[dict[str, Any]]:
+        """Load the stored credential from the system keyring.
+
+        Returns a dict with an ``auth_mode`` key (``"cookie"`` or
+        ``"token"``), or None if nothing is stored.
+        """
         try:
-            token = keyring.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
-            if token:
-                logger.info("Token loaded from keyring")
-                return token
-            logger.info("No token found in keyring")
-            return None
+            raw = keyring.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
+            if not raw:
+                logger.info("No credential found in keyring")
+                return None
+
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict) and "auth_mode" in data:
+                    logger.info("Credential loaded from keyring (%s)", data["auth_mode"])
+                    return data
+            except json.JSONDecodeError:
+                pass
+
+            # Legacy: a bare bearer-token string saved before cookie-auth support
+            logger.info("Legacy bearer-token credential loaded from keyring")
+            return {"auth_mode": "token", "token": raw}
         except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Failed to load token from keyring: %s", e)
+            logger.error("Failed to load credential from keyring: %s", e)
             return None
 
     def delete_token(self) -> None:
@@ -62,13 +94,17 @@ class SecureMonarchSession:
 
     def get_authenticated_client(self) -> Optional[MonarchMoney]:
         """Get an authenticated MonarchMoney client."""
-        token = self.load_token()
-        if not token:
+        cred = self.load_credential()
+        if not cred:
             return None
 
         try:
-            client = MonarchMoney(token=token)
-            logger.info("MonarchMoney client created with stored token")
+            if cred["auth_mode"] == "cookie":
+                client = MonarchMoney()
+                client.set_cookies(cred["cookies"])
+            else:
+                client = MonarchMoney(token=cred["token"])
+            logger.info("MonarchMoney client created with stored %s credential", cred["auth_mode"])
             return client
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Failed to create MonarchMoney client: %s", e)
@@ -76,10 +112,13 @@ class SecureMonarchSession:
 
     def save_authenticated_session(self, mm: MonarchMoney) -> None:
         """Save the session from an authenticated MonarchMoney instance."""
-        if mm.token:
+        cookies = getattr(mm, "_cookies", None)  # pylint: disable=protected-access
+        if cookies:
+            self.save_cookies(cookies)
+        elif mm.token:
             self.save_token(mm.token)
         else:
-            logger.warning("MonarchMoney instance has no token to save")
+            logger.warning("MonarchMoney instance has no token or cookies to save")
 
     def _cleanup_old_session_files(self) -> None:
         """Clean up old insecure session files."""

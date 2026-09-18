@@ -163,16 +163,20 @@ def setup_authentication() -> str:
     """Get instructions for setting up secure authentication with Monarch Money."""
     return """Monarch Money - Authentication
 
-Authentication happens automatically in your browser:
+Monarch blocks programmatic password/MFA login behind a Cloudflare
+CAPTCHA, so authentication uses a browser session cookie instead:
 
 1. When the MCP server starts without a saved session, a login page
    opens in your browser automatically
 
-2. Enter your Monarch Money email and password
+2. In a separate tab, sign in at app.monarch.com normally
 
-3. Provide your 2FA code if you have MFA enabled
+3. Open DevTools -> Network tab, click any "graphql" request, and
+   copy the full Cookie value from its Request Headers
 
-4. Once authenticated, the token is saved to your system keyring
+4. Paste that cookie string into the login page and click Connect
+
+5. Once verified, the session is saved to your system keyring
 
 Then start using Monarch tools in Claude Desktop:
    - get_accounts - View all accounts
@@ -180,29 +184,29 @@ Then start using Monarch tools in Claude Desktop:
    - get_budgets - Budget information
 
 Session persists across Claude restarts (weeks/months).
-Expired sessions are re-authenticated automatically.
-Credentials are entered in your browser, never through Claude.
-
-Alternative: run `python login_setup.py` in a terminal for
-headless environments where a browser is not available."""
+Expired sessions are re-authenticated automatically — just repeat
+the cookie-paste step when prompted.
+Credentials are entered in your browser, never through Claude."""
 
 
 @mcp.tool()
 def check_auth_status() -> str:
     """Check if already authenticated with Monarch Money."""
     try:
-        # Check if we have a token in the keyring
-        token = secure_session.load_token()
-        if token:
+        cred = secure_session.load_credential()
+        if cred and cred["auth_mode"] == "cookie":
+            status = "Authenticated (browser cookie session) in secure keyring storage\n"
+        elif cred:
             status = "Authentication token found in secure keyring storage\n"
         else:
-            status = "No authentication token found in keyring\n"
+            status = "No authentication credential found in keyring\n"
 
         if os.getenv("MONARCH_EMAIL"):
             status += "Environment credentials configured: yes\n"
 
         status += (
-            "\nTry get_accounts to test connection or run login_setup.py if needed."
+            "\nTry get_accounts to test connection, or run setup_authentication "
+            "for instructions if needed."
         )
 
         return status
@@ -214,11 +218,12 @@ def check_auth_status() -> str:
 def debug_session_loading() -> str:
     """Debug keyring session loading issues."""
     try:
-        # Check keyring access
-        token = secure_session.load_token()
-        if token:
+        cred = secure_session.load_credential()
+        if cred and cred["auth_mode"] == "cookie":
+            return "Cookie session found in keyring."
+        if cred:
             return "Token found in keyring."
-        return "No token found in keyring. Run login_setup.py to authenticate."
+        return "No token found in keyring. Run setup_authentication for instructions."
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Keyring access failed: %s", e, exc_info=True)
         return "Keyring access failed. See the server logs for details."

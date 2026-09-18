@@ -1,8 +1,8 @@
-"""Auth handler unit tests (20 tests).
+"""Auth handler unit tests.
 
-Covers _AuthHandler routing (do_GET, do_POST), login/MFA logic,
+Covers _AuthHandler routing (do_GET, do_POST), cookie login logic,
 _send_json/_send_html helpers, log_message, _find_free_port,
-and _validate_token.
+and _validate_credential.
 """
 # pylint: disable=missing-function-docstring,protected-access
 
@@ -11,13 +11,13 @@ import json
 from unittest.mock import patch, Mock, MagicMock
 
 import pytest
-from monarchmoney import RequireMFAException
+from monarchmoney import LoginFailedException
 
 from monarch_mcp.auth_server import (
     _AuthHandler,
     _AuthState,
     _find_free_port,
-    _validate_token,
+    _validate_credential,
 )
 
 
@@ -78,31 +78,22 @@ def _make_handler(
 # ===================================================================
 
 
-def test_login_empty_email():
+def test_login_empty_cookie():
     handler = _make_handler()
     handler._send_json = Mock()
-    handler._handle_login({"email": "", "password": "secret"})
+    handler._handle_login({"cookie": ""})
 
     resp = handler._send_json.call_args[0][0]
     assert "error" in resp
-    assert "required" in resp["error"].lower()
-
-
-def test_login_empty_password():
-    handler = _make_handler()
-    handler._send_json = Mock()
-    handler._handle_login({"email": "a@b.com", "password": ""})
-
-    resp = handler._send_json.call_args[0][0]
-    assert "error" in resp
+    assert "cookie" in resp["error"].lower()
 
 
 # ===================================================================
-# _handle_login — success and MFA
+# _handle_login — success and failure
 # ===================================================================
 
 
-def test_login_success_no_mfa():
+def test_login_success():
     handler = _make_handler()
     handler._send_json = Mock()
     with (
@@ -110,7 +101,7 @@ def test_login_success_no_mfa():
         patch("monarch_mcp.auth_server._run_sync"),
         patch("monarch_mcp.auth_server.secure_session") as mock_ss,
     ):
-        handler._handle_login({"email": "a@b.com", "password": "pass"})
+        handler._handle_login({"cookie": "session_id=a; csrftoken=b"})
 
     mock_ss.save_authenticated_session.assert_called_once()
     assert handler.auth_state.completed is True
@@ -118,98 +109,21 @@ def test_login_success_no_mfa():
     assert resp["success"] is True
 
 
-def test_login_mfa_required():
+def test_login_invalid_cookie():
     handler = _make_handler()
     handler._send_json = Mock()
     with (
         patch("monarch_mcp.auth_server.MonarchMoney"),
         patch(
             "monarch_mcp.auth_server._run_sync",
-            side_effect=RequireMFAException(),
+            side_effect=LoginFailedException("Missing required cookies"),
         ),
     ):
-        handler._handle_login({"email": "a@b.com", "password": "pass"})
-
-    assert handler.auth_state.awaiting_mfa is True
-    assert handler.auth_state.email == "a@b.com"
-    resp = handler._send_json.call_args[0][0]
-    assert resp["mfa_required"] is True
-
-
-# ===================================================================
-# _handle_mfa — validation and success
-# ===================================================================
-
-
-def test_mfa_empty_code():
-    handler = _make_handler()
-    handler._send_json = Mock()
-    handler.auth_state.awaiting_mfa = True
-    handler._handle_mfa({"code": ""})
+        handler._handle_login({"cookie": "not=valid"})
 
     resp = handler._send_json.call_args[0][0]
     assert "error" in resp
-    assert "required" in resp["error"].lower()
-
-
-def test_mfa_no_pending_challenge():
-    handler = _make_handler()
-    handler._send_json = Mock()
-    handler.auth_state.awaiting_mfa = False
-    handler._handle_mfa({"code": "123456"})
-
-    resp = handler._send_json.call_args[0][0]
-    assert "error" in resp
-    assert "No pending MFA" in resp["error"]
-
-
-def test_mfa_success():
-    handler = _make_handler()
-    handler._send_json = Mock()
-    handler.auth_state.email = "a@b.com"
-    handler.auth_state.password = "pass"
-    handler.auth_state.awaiting_mfa = True
-
-    with (
-        patch("monarch_mcp.auth_server.MonarchMoney"),
-        patch("monarch_mcp.auth_server._run_sync"),
-        patch("monarch_mcp.auth_server.secure_session") as mock_ss,
-    ):
-        handler._handle_mfa({"code": "123456"})
-
-    mock_ss.save_authenticated_session.assert_called_once()
-    assert handler.auth_state.completed is True
-    resp = handler._send_json.call_args[0][0]
-    assert resp["success"] is True
-
-
-def test_auth_state_clear_secrets():
-    state = _AuthState(email="a@b.com", password="pass", awaiting_mfa=True)
-    state.clear_secrets()
-
-    assert state.email == ""
-    assert state.password == ""
-    assert state.awaiting_mfa is False
-
-
-def test_mfa_success_clears_cached_credentials():
-    # The plaintext password (cached across the MFA challenge) must not
-    # linger in memory after authentication completes.
-    handler = _make_handler()
-    handler._send_json = Mock()
-    handler.auth_state.email = "a@b.com"
-    handler.auth_state.password = "pass"
-    handler.auth_state.awaiting_mfa = True
-
-    with (
-        patch("monarch_mcp.auth_server.MonarchMoney"),
-        patch("monarch_mcp.auth_server._run_sync"),
-        patch("monarch_mcp.auth_server.secure_session"),
-    ):
-        handler._handle_mfa({"code": "123456"})
-
-    assert handler.auth_state.email == ""
-    assert handler.auth_state.password == ""
+    assert "Missing required cookies" in resp["error"]
 
 
 # ===================================================================
@@ -287,21 +201,11 @@ def test_do_get_404():
 
 
 def test_do_post_login_route():
-    handler = _make_handler(path="/login", body={"email": "", "password": ""})
+    handler = _make_handler(path="/login", body={"cookie": ""})
     handler._send_json = Mock()
     handler.do_POST()
 
-    # Should reach _handle_login which validates empty fields
-    handler._send_json.assert_called_once()
-    resp = handler._send_json.call_args[0][0]
-    assert "error" in resp
-
-
-def test_do_post_mfa_route():
-    handler = _make_handler(path="/mfa", body={"code": ""})
-    handler._send_json = Mock()
-    handler.do_POST()
-
+    # Should reach _handle_login which validates the empty cookie field
     handler._send_json.assert_called_once()
     resp = handler._send_json.call_args[0][0]
     assert "error" in resp
@@ -343,22 +247,37 @@ def test_find_free_port():
 
 
 # ===================================================================
-# _validate_token
+# _validate_credential
 # ===================================================================
 
 
-def test_validate_token_valid():
+def test_validate_credential_token_valid():
     with (
         patch("monarch_mcp.auth_server.MonarchMoney") as mock_cls,
         patch("monarch_mcp.auth_server._run_sync"),
     ):
         mock_cls.return_value = MagicMock()
-        result = _validate_token("good-token")
+        result = _validate_credential({"auth_mode": "token", "token": "good-token"})
 
     assert result is True
+    mock_cls.assert_called_once_with(token="good-token")
 
 
-def test_validate_token_auth_error():
+def test_validate_credential_cookie_valid():
+    with (
+        patch("monarch_mcp.auth_server.MonarchMoney") as mock_cls,
+        patch("monarch_mcp.auth_server._run_sync"),
+    ):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        cred = {"auth_mode": "cookie", "cookies": {"session_id": "a", "csrftoken": "b"}}
+        result = _validate_credential(cred)
+
+    assert result is True
+    mock_client.set_cookies.assert_called_once_with({"session_id": "a", "csrftoken": "b"})
+
+
+def test_validate_credential_auth_error():
     from gql.transport.exceptions import TransportServerError  # pylint: disable=import-outside-toplevel
 
     with (
@@ -368,12 +287,12 @@ def test_validate_token_auth_error():
             side_effect=TransportServerError("Unauthorized", code=401),
         ),
     ):
-        result = _validate_token("bad-token")
+        result = _validate_credential({"auth_mode": "token", "token": "bad-token"})
 
     assert result is False
 
 
-def test_validate_token_server_error():
+def test_validate_credential_server_error():
     with (
         patch("monarch_mcp.auth_server.MonarchMoney"),
         patch(
@@ -381,7 +300,7 @@ def test_validate_token_server_error():
             side_effect=OSError("network down"),
         ),
     ):
-        result = _validate_token("some-token")
+        result = _validate_credential({"auth_mode": "token", "token": "some-token"})
 
     assert result is None
 
@@ -397,7 +316,7 @@ def test_do_post_rejects_non_json_content_type():
     # any authentication side effect (login-CSRF).
     handler = _make_handler(
         path="/login",
-        body={"email": "attacker@evil.com", "password": "x"},
+        body={"cookie": "session=attacker"},
         content_type="text/plain",
     )
     handler._send_json = Mock()
@@ -411,7 +330,7 @@ def test_do_post_rejects_non_json_content_type():
 def test_do_post_rejects_cross_origin():
     handler = _make_handler(
         path="/login",
-        body={"email": "attacker@evil.com", "password": "x"},
+        body={"cookie": "session=attacker"},
         origin="https://evil.example",
     )
     handler._send_json = Mock()
@@ -426,7 +345,7 @@ def test_do_post_rejects_unexpected_host():
     # DNS-rebinding: a rebound hostname that resolves to 127.0.0.1.
     handler = _make_handler(
         path="/login",
-        body={"email": "attacker@evil.com", "password": "x"},
+        body={"cookie": "session=attacker"},
         host="attacker.example",
     )
     handler._send_json = Mock()
@@ -451,7 +370,7 @@ def test_do_post_allows_request_without_origin_header():
     # are still served, as long as Content-Type is application/json.
     handler = _make_handler(
         path="/login",
-        body={"email": "", "password": ""},
+        body={"cookie": ""},
         origin=None,
     )
     handler._send_json = Mock()
@@ -460,7 +379,7 @@ def test_do_post_allows_request_without_origin_header():
     handler.send_error.assert_not_called()
     resp = handler._send_json.call_args[0][0]
     assert "error" in resp
-    assert "required" in resp["error"].lower()
+    assert "cookie" in resp["error"].lower()
 
 
 # ===================================================================
@@ -478,29 +397,7 @@ def test_login_unexpected_error_returns_generic_message():
             side_effect=RuntimeError("internal stack detail xyz"),
         ),
     ):
-        handler._handle_login({"email": "a@b.com", "password": "pass"})
-
-    resp = handler._send_json.call_args[0][0]
-    assert "error" in resp
-    assert "internal stack detail xyz" not in resp["error"]
-    # Points the operator to where the real detail lives, without leaking it.
-    assert "logs" in resp["error"].lower()
-
-
-def test_mfa_unexpected_error_returns_generic_message():
-    handler = _make_handler()
-    handler._send_json = Mock()
-    handler.auth_state.email = "a@b.com"
-    handler.auth_state.password = "pass"
-    handler.auth_state.awaiting_mfa = True
-    with (
-        patch("monarch_mcp.auth_server.MonarchMoney"),
-        patch(
-            "monarch_mcp.auth_server._run_sync",
-            side_effect=RuntimeError("internal stack detail xyz"),
-        ),
-    ):
-        handler._handle_mfa({"code": "123456"})
+        handler._handle_login({"cookie": "session=abc"})
 
     resp = handler._send_json.call_args[0][0]
     assert "error" in resp
@@ -510,11 +407,11 @@ def test_mfa_unexpected_error_returns_generic_message():
 
 
 # ===================================================================
-# PII hygiene (account email not written to logs)
+# Secret hygiene (pasted cookie not written to logs)
 # ===================================================================
 
 
-def test_login_failure_does_not_log_email():
+def test_login_failure_does_not_log_cookie():
     from monarchmoney import LoginFailedException  # pylint: disable=import-outside-toplevel
 
     handler = _make_handler()
@@ -523,11 +420,11 @@ def test_login_failure_does_not_log_email():
         patch("monarch_mcp.auth_server.MonarchMoney"),
         patch(
             "monarch_mcp.auth_server._run_sync",
-            side_effect=LoginFailedException(),
+            side_effect=LoginFailedException("Missing required cookies"),
         ),
         patch("monarch_mcp.auth_server.logger") as mock_log,
     ):
-        handler._handle_login({"email": "secret@example.com", "password": "pass"})
+        handler._handle_login({"cookie": "session=SECRETCOOKIEVALUE"})
 
     logged = " ".join(
         str(arg)
@@ -538,4 +435,4 @@ def test_login_failure_does_not_log_email():
         )
         for arg in call[0]
     )
-    assert "secret@example.com" not in logged
+    assert "SECRETCOOKIEVALUE" not in logged
